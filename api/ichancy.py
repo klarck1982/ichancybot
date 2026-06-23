@@ -1,103 +1,52 @@
-# api/ichancy.py - Camoufox (النسخة النهائية)
+# api/ichancy.py - نسخة اختبار (للتحقق من حظر الـ IP)
 
-import json
 import logging
-from camoufox.async_api import AsyncCamoufox
-from config import BASE_URL, AGENT_USERNAME, AGENT_PASSWORD, CURRENCY_CODE, MONEY_STATUS, PARENT_ID
+from curl_cffi import requests as cf_requests
 
 logger = logging.getLogger(__name__)
 
 class IchancyAPI:
     def __init__(self):
-        self.username = AGENT_USERNAME
-        self.password = AGENT_PASSWORD
-        self.base_url = BASE_URL
-        self.browser = None
-        self.page = None
+        self.username = "test"
+        self.password = "test"
 
-    async def _init_browser(self):
-        if self.page:
-            return
+    async def test_ip_block(self):
+        """اختبار بسيط لمعرفة إذا كان الـ IP محظور"""
+        test_url = "https://agents.ichancy.com/global/api/User/signIn"
 
-        self.browser = await AsyncCamoufox(
-            headless=True,
-            geoip=True,
-            humanize=True,
-            locale="en-US",
-            os="windows",
-        ).start()
-
-        context = await self.browser.new_context()
-        self.page = await context.new_page()
-
-        # الدخول للموقع
-        await self.page.goto("https://agents.ichancy.com", timeout=120000)
-        await self.page.wait_for_timeout(8000)
-
-        # تسجيل الدخول
-        await self.page.evaluate(f"""
-            fetch('/global/api/User/signIn', {{
-                method: 'POST',
-                headers: {{'Content-Type': 'application/json'}},
-                body: JSON.stringify({{
-                    username: {json.dumps(self.username)},
-                    password: {json.dumps(self.password)}
-                }})
-            }})
-        """)
-        await self.page.wait_for_timeout(4000)
-        logger.info("✅ Camoufox جاهز")
-
-    async def _make_request(self, endpoint: str, body: dict):
-        await self._init_browser()
-
-        url = self.base_url + endpoint
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Content-Type": "application/json",
+            "Origin": "https://agents.ichancy.com",
+            "Referer": "https://agents.ichancy.com/",
+        }
 
         try:
-            result = await self.page.evaluate(f"""
-                (async () => {{
-                    const res = await fetch("{url}", {{
-                        method: 'POST',
-                        headers: {{
-                            'Content-Type': 'application/json',
-                            'Authorization': 'Basic ' + btoa("{self.username}:{self.password}")
-                        }},
-                        body: JSON.stringify({json.dumps(body)})
-                    }});
-                    return {{status: res.status, text: await res.text()}};
-                }})()
-            """)
+            # طلب بسيط بدون كوكيز
+            response = cf_requests.post(
+                test_url,
+                json={"username": "test", "password": "test"},
+                headers=headers,
+                impersonate="chrome124",
+                timeout=15
+            )
 
-            logger.info(f"[{endpoint}] Status: {result['status']}")
+            logger.info(f"=== نتيجة اختبار الـ IP ===")
+            logger.info(f"Status Code: {response.status_code}")
+            logger.info(f"Response (أول 500 حرف): {response.text[:500]}")
 
-            if result['status'] == 200:
-                try:
-                    return json.loads(result['text'])
-                except:
-                    return {"error": result['text']}
+            if response.status_code == 403:
+                logger.warning("❌ الـ IP محظور (403) حتى بدون كوكيز")
+            elif response.status_code == 200:
+                logger.info("✅ الـ IP غير محظور")
             else:
-                return {"error": f"HTTP {result['status']}: {result['text'][:300]}"}
+                logger.info(f"رد غير متوقع: {response.status_code}")
+
+            return response.status_code
 
         except Exception as e:
-            logger.error(f"خطأ في {endpoint}: {e}")
-            self.page = None
-            return {"error": str(e)}
-
-    async def register_player(self, email, password, login, country="SY"):
-        return await self._make_request("/Player/registerPlayer", {
-            "player": {
-                "email": email,
-                "password": password,
-                "parentId": PARENT_ID,
-                "login": login,
-                "countryCode": country
-            }
-        })
-
-    async def deposit(self, player_id, amount): ...
-    async def withdraw(self, player_id, amount): ...
-    async def get_balance(self, player_id): ...
-    async def get_statistics(self, start=0, limit=10): ...
+            logger.error(f"خطأ في الاختبار: {e}")
+            return None
 
 
 api = IchancyAPI()
