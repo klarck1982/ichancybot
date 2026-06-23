@@ -1,8 +1,8 @@
-# api/ichancy.py (نسخة محسنة - جربها)
+# api/ichancy.py - باستخدام Camoufox (أقوى حل حالياً)
 
 import json
 import logging
-from curl_cffi import requests as cf_requests
+from camoufox.async_api import AsyncCamoufox
 from config import BASE_URL, AGENT_USERNAME, AGENT_PASSWORD, CURRENCY_CODE, MONEY_STATUS, PARENT_ID
 
 logger = logging.getLogger(__name__)
@@ -12,55 +12,83 @@ class IchancyAPI:
         self.username = AGENT_USERNAME
         self.password = AGENT_PASSWORD
         self.base_url = BASE_URL
+        self.browser = None
+        self.context = None
+        self.page = None
 
-        # === ضع الكوكيز الجديدة هنا ===
-        self.cookie_string = "PHPSESSID_3a07edcde6f57a008f3251235df79776a424dd7623e40d4250e37e4f1f15fadf=f608cfb6e18a5696ddd1ed6425767567; cf_clearance=p75pkpIrPCEUduL.Np8KXnhZNIjyW3KGTLYq8s_3f7I-1782251181-1.2.1.1-5WXiJLuHO7.MzCxLbgtsxrtnpvR2mQpgIPCUa.9ph.rwy7eY14at3TEQJNvK3c30aGYmQmTpf8rZgQaK_46VkABlZKA15ves.EuU9jR7tJXDUOMwvmEXPxMZJNCSAq0S.l00o96D8C8bUe4I5HOcbxO9g8JXXmyv8A53symubGsVMvhuKh.NxoiTShKwgFH8PyAmPoE9R7vUT8H2Ybvwwx13Zb_8xmb6ECnaax3FDNSwZb0xcrqX59C2j_qKiI_wqxBbmkKnberIBE4u7v3av5ECeMrW.r2ZT9U4IGCIt0sWTqcnnef._Tphj5q7WqTPNPXYjbsfbSrNe_vSdpmlXY.kYuRl6yF0LZj6.26_7qNLNT.sKwGhvrI2X7HKVsn6gtoMLA57sRDABA.1HPAlTYJK8jAgY8PyitoPpt1siZN_M1gZ5psKRHNDQFETe6Wa"
+    async def _init_camoufox(self):
+        """تهيئة Camoufox مع أقصى حماية"""
+        if self.page:
+            return
 
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
-            "Content-Type": "application/json",
-            "Origin": "https://agents.ichancy.com",
-            "Referer": "https://agents.ichancy.com/",
-            "Connection": "keep-alive",
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-origin",
-        }
+        self.browser = await AsyncCamoufox(
+            headless=True,
+            geoip=True,                    # مهم جداً
+            humanize=True,                 # سلوك بشري
+            locale="en-US",
+        ).start()
 
-    def _make_request(self, endpoint: str, body: dict):
+        self.context = await self.browser.new_context()
+        self.page = await self.context.new_page()
+
+        # تسجيل الدخول
+        await self.page.goto("https://agents.ichancy.com", timeout=90000)
+        await self.page.wait_for_timeout(5000)
+
+        # تسجيل الدخول عبر fetch
+        await self.page.evaluate(f"""
+            fetch('/global/api/User/signIn', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{
+                    username: {json.dumps(self.username)},
+                    password: {json.dumps(self.password)}
+                }})
+            }})
+        """)
+        await self.page.wait_for_timeout(3000)
+        logger.info("✅ تم تسجيل الدخول بـ Camoufox")
+
+    async def _make_request(self, endpoint: str, body: dict):
+        await self._init_camoufox()
+
         url = self.base_url + endpoint
-        auth = (self.username, self.password)
 
         try:
-            response = cf_requests.post(
-                url,
-                json=body,
-                headers=self.headers,
-                cookies=self.cookie_string,      # نستخدم الـ string
-                auth=auth,
-                impersonate="chrome124",
-                timeout=30
-            )
+            result = await self.page.evaluate(f"""
+                (async () => {{
+                    const res = await fetch("{url}", {{
+                        method: 'POST',
+                        headers: {{
+                            'Content-Type': 'application/json',
+                            'Authorization': 'Basic ' + btoa("{self.username}:{self.password}")
+                        }},
+                        body: JSON.stringify({json.dumps(body)})
+                    }});
+                    return {{status: res.status, text: await res.text()}};
+                }})()
+            """)
 
-            logger.info(f"[{endpoint}] Status: {response.status_code} | Body: {response.text[:200]}")
+            logger.info(f"[{endpoint}] Status: {result['status']}")
 
-            if response.status_code == 200:
+            if result['status'] == 200:
                 try:
-                    return response.json()
+                    return json.loads(result['text'])
                 except:
-                    return {"error": response.text}
+                    return {"error": result['text']}
             else:
-                return {"error": f"HTTP {response.status_code}: {response.text[:400]}"}
+                return {"error": f"HTTP {result['status']}: {result['text'][:300]}"}
 
         except Exception as e:
             logger.error(f"خطأ في {endpoint}: {e}")
+            # إعادة تهيئة في حال الفشل
+            self.page = None
             return {"error": str(e)}
 
     # ==================== الدوال ====================
+
     async def register_player(self, email, password, login, country="SY"):
-        return self._make_request("/Player/registerPlayer", {
+        return await self._make_request("/Player/registerPlayer", {
             "player": {
                 "email": email,
                 "password": password,
@@ -70,10 +98,35 @@ class IchancyAPI:
             }
         })
 
-    async def deposit(self, player_id, amount): ...  # نفس الدوال السابقة
-    async def withdraw(self, player_id, amount): ...
-    async def get_balance(self, player_id): ...
-    async def get_statistics(self, start=0, limit=10): ...
+    async def deposit(self, player_id, amount):
+        return await self._make_request("/Player/depositToPlayer", {
+            "amount": amount,
+            "playerId": player_id,
+            "currencyCode": CURRENCY_CODE,
+            "moneyStatus": MONEY_STATUS,
+            "comment": None
+        })
+
+    async def withdraw(self, player_id, amount):
+        return await self._make_request("/Player/withdrawFromPlayer", {
+            "amount": -abs(amount),
+            "playerId": player_id,
+            "currencyCode": CURRENCY_CODE,
+            "moneyStatus": MONEY_STATUS,
+            "comment": None
+        })
+
+    async def get_balance(self, player_id):
+        return await self._make_request("/Player/getPlayerBalanceById", {
+            "playerId": player_id
+        })
+
+    async def get_statistics(self, start=0, limit=10):
+        return await self._make_request("/Statistics/getPlayersStatisticsPro", {
+            "start": start,
+            "limit": limit,
+            "filter": {}
+        })
 
 
 api = IchancyAPI()
