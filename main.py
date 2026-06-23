@@ -1,3 +1,4 @@
+await api._init_browser()
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher, types
