@@ -1,9 +1,8 @@
-# api/ichancy.py - نسخة Railway (rebrowser-patches)
+# api/ichancy.py - Camoufox (النسخة النهائية)
 
 import json
 import logging
-from playwright.async_api import async_playwright
-from rebrowser_patches.async_api import patch_playwright
+from camoufox.async_api import AsyncCamoufox
 from config import BASE_URL, AGENT_USERNAME, AGENT_PASSWORD, CURRENCY_CODE, MONEY_STATUS, PARENT_ID
 
 logger = logging.getLogger(__name__)
@@ -13,35 +12,27 @@ class IchancyAPI:
         self.username = AGENT_USERNAME
         self.password = AGENT_PASSWORD
         self.base_url = BASE_URL
+        self.browser = None
         self.page = None
 
     async def _init_browser(self):
         if self.page:
             return
 
-        patched_playwright = await patch_playwright(async_playwright()).start()
-
-        browser = await patched_playwright.chromium.launch(
+        self.browser = await AsyncCamoufox(
             headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
-            ]
-        )
-
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            viewport={"width": 1366, "height": 768},
+            geoip=True,
+            humanize=True,
             locale="en-US",
-        )
+            os="windows",
+        ).start()
 
+        context = await self.browser.new_context()
         self.page = await context.new_page()
 
         # الدخول للموقع
-        await self.page.goto("https://agents.ichancy.com", timeout=90000)
-        await self.page.wait_for_timeout(6000)
+        await self.page.goto("https://agents.ichancy.com", timeout=120000)
+        await self.page.wait_for_timeout(8000)
 
         # تسجيل الدخول
         await self.page.evaluate(f"""
@@ -54,8 +45,8 @@ class IchancyAPI:
                 }})
             }})
         """)
-        await self.page.wait_for_timeout(3000)
-        logger.info("✅ تم تشغيل rebrowser-patches بنجاح")
+        await self.page.wait_for_timeout(4000)
+        logger.info("✅ Camoufox جاهز")
 
     async def _make_request(self, endpoint: str, body: dict):
         await self._init_browser()
@@ -77,6 +68,8 @@ class IchancyAPI:
                 }})()
             """)
 
+            logger.info(f"[{endpoint}] Status: {result['status']}")
+
             if result['status'] == 200:
                 try:
                     return json.loads(result['text'])
@@ -90,7 +83,6 @@ class IchancyAPI:
             self.page = None
             return {"error": str(e)}
 
-    # ==================== الدوال ====================
     async def register_player(self, email, password, login, country="SY"):
         return await self._make_request("/Player/registerPlayer", {
             "player": {
@@ -102,7 +94,7 @@ class IchancyAPI:
             }
         })
 
-    async def deposit(self, player_id, amount): ...  # نفس الدوال السابقة
+    async def deposit(self, player_id, amount): ...
     async def withdraw(self, player_id, amount): ...
     async def get_balance(self, player_id): ...
     async def get_statistics(self, start=0, limit=10): ...
