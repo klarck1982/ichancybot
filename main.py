@@ -6,7 +6,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from config import BOT_TOKEN
 from database.db import init_db
 from handlers import register, balance
-from api.ichancy import api
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,34 +42,16 @@ async def cmd_start(message: types.Message):
 async def cmd_help(message: types.Message):
     await message.answer(
         "📖 قائمة الأوامر:\n\n"
-        "📝 تسجيل لاعب جديد — إنشاء حساب جديد على المنصة\n"
-        "💰 إيداع — إضافة رصيد للحساب\n"
-        "💸 سحب — سحب رصيد من الحساب\n"
-        "💳 عرض الرصيد — معرفة الرصيد الحالي\n"
-        "📊 سجل العمليات — عرض آخر العمليات\n",
+        "📝 تسجيل لاعب جديد — إنشاء حساب جديد\n"
+        "💰 إيداع — إضافة رصيد\n"
+        "💸 سحب — سحب رصيد\n"
+        "💳 عرض الرصيد — الرصيد الحالي\n"
+        "📊 سجل العمليات — آخر العمليات\n",
         reply_markup=main_keyboard()
     )
 
-async def refresh_session_loop():
-    """تجديد الجلسة كل ساعة تلقائياً"""
-    while True:
-        try:
-            logger.info("جاري تجديد جلسة Cloudflare...")
-            await api.login()
-            logger.info("تم تجديد الجلسة بنجاح")
-        except Exception as e:
-            logger.error(f"خطأ في تجديد الجلسة: {e}")
-        await asyncio.sleep(3600)
-
 async def main():
     init_db()
-    logger.info("تهيئة قاعدة البيانات...")
-
-    logger.info("تسجيل الدخول الأولي...")
-    await api.login()
-
-    asyncio.create_task(refresh_session_loop())
-
     logger.info("البوت يعمل...")
     await dp.start_polling(bot)
 
