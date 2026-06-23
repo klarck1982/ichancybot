@@ -38,7 +38,7 @@ class IchancyAPI:
                         }});
                     }})()
                 """
-                await page.evaluate(login_script)
+                await page.evaluate(login_script, None)
                 await page.wait_for_timeout(2000)
 
                 # الطلب الفعلي
@@ -60,7 +60,7 @@ class IchancyAPI:
                         return {{status: res.status, body: await res.text()}};
                     }})()
                 """
-                result = await page.evaluate(request_script)
+                result = await page.evaluate(request_script, None)
                 logger.info(f"رد {endpoint} ({result['status']}): {result['body'][:300]}")
 
                 if result['status'] == 200:
