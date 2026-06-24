@@ -1,11 +1,17 @@
-import httpx
 import asyncio
 import logging
 import json
+import base64
+import os
 from playwright.async_api import async_playwright
 from config import BASE_URL, AGENT_USERNAME, AGENT_PASSWORD, CURRENCY_CODE, MONEY_STATUS, PARENT_ID
 
 logger = logging.getLogger(__name__)
+
+# بيانات البروكسي من المتغيرات
+PROXY_SERVER = os.getenv("PROXY_SERVER", "")  # مثال: http://1.2.3.4:8080
+PROXY_USER = os.getenv("PROXY_USER", "")
+PROXY_PASS = os.getenv("PROXY_PASS", "")
 
 class IchancyAPI:
     def __init__(self):
@@ -13,53 +19,49 @@ class IchancyAPI:
         self.password = AGENT_PASSWORD
         self.base_url = BASE_URL
 
+    def _get_proxy(self):
+        if not PROXY_SERVER:
+            return None
+        proxy = {"server": PROXY_SERVER}
+        if PROXY_USER:
+            proxy["username"] = PROXY_USER
+        if PROXY_PASS:
+            proxy["password"] = PROXY_PASS
+        return proxy
+
     async def _run_in_browser(self, endpoint, body):
+        proxy = self._get_proxy()
         async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
-            )
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
-            )
+            launch_args = {
+                "headless": True,
+                "args": ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+            }
+            if proxy:
+                launch_args["proxy"] = proxy
+                logger.info(f"استخدام البروكسي: {PROXY_SERVER}")
+
+            browser = await p.chromium.launch(**launch_args)
+            context_args = {
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+            }
+            if proxy:
+                context_args["proxy"] = proxy
+
+            context = await browser.new_context(**context_args)
             page = await context.new_page()
             try:
                 await page.goto("https://agents.ichancy.com", wait_until="domcontentloaded", timeout=40000)
                 await page.wait_for_timeout(5000)
 
-                # تسجيل الدخول — تمرير المتغيرات عبر injection آمن
-                login_script = f"""
-                    (async () => {{
-                        await fetch('/global/api/User/signIn', {{
-                            method: 'POST',
-                            headers: {{'Content-Type': 'application/json'}},
-                            body: JSON.stringify({{username: {json.dumps(self.username)}, password: {json.dumps(self.password)}}})
-                        }});
-                    }})()
-                """
+                login_script = f"(async()=>{{await fetch('/global/api/User/signIn',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{username:{json.dumps(self.username)},password:{json.dumps(self.password)}}})}})}})()"
                 await page.evaluate(login_script, None)
                 await page.wait_for_timeout(2000)
 
-                # الطلب الفعلي
+                b64 = base64.b64encode(f"{self.username}:{self.password}".encode()).decode()
                 url = self.base_url + endpoint
-                credentials = f"{self.username}:{self.password}"
-                import base64
-                b64 = base64.b64encode(credentials.encode()).decode()
+                req_script = f"(async()=>{{const r=await fetch({json.dumps(url)},{{method:'POST',headers:{{'Content-Type':'application/json','Authorization':'Basic {b64}'}},body:JSON.stringify({json.dumps(body)})}});return{{status:r.status,body:await r.text()}}}})() "
+                result = await page.evaluate(req_script, None)
 
-                request_script = f"""
-                    (async () => {{
-                        const res = await fetch({json.dumps(url)}, {{
-                            method: 'POST',
-                            headers: {{
-                                'Content-Type': 'application/json',
-                                'Authorization': 'Basic {b64}'
-                            }},
-                            body: JSON.stringify({json.dumps(body)})
-                        }});
-                        return {{status: res.status, body: await res.text()}};
-                    }})()
-                """
-                result = await page.evaluate(request_script, None)
                 logger.info(f"رد {endpoint} ({result['status']}): {result['body'][:300]}")
 
                 if result['status'] == 200:
@@ -71,53 +73,32 @@ class IchancyAPI:
                     return {"error": f"HTTP {result['status']}: {result['body'][:300]}"}
 
             except Exception as e:
-                logger.error(f"خطأ في المتصفح {endpoint}: {e}")
+                logger.error(f"خطأ {endpoint}: {e}")
                 return {"error": str(e)}
             finally:
                 await browser.close()
 
-    async def login(self):
-        pass
+    async def login(self): pass
 
     async def register_player(self, email, password, login, country="SY"):
         return await self._run_in_browser("/Player/registerPlayer", {
-            "player": {
-                "email": email,
-                "password": password,
-                "parentId": PARENT_ID,
-                "login": login,
-                "countryCode": country
-            }
+            "player": {"email": email, "password": password, "parentId": PARENT_ID, "login": login, "countryCode": country}
         })
 
     async def deposit(self, player_id, amount):
         return await self._run_in_browser("/Player/depositToPlayer", {
-            "amount": amount,
-            "playerId": player_id,
-            "currencyCode": CURRENCY_CODE,
-            "moneyStatus": MONEY_STATUS,
-            "comment": None
+            "amount": amount, "playerId": player_id, "currencyCode": CURRENCY_CODE, "moneyStatus": MONEY_STATUS, "comment": None
         })
 
     async def withdraw(self, player_id, amount):
         return await self._run_in_browser("/Player/withdrawFromPlayer", {
-            "amount": -abs(amount),
-            "playerId": player_id,
-            "currencyCode": CURRENCY_CODE,
-            "moneyStatus": MONEY_STATUS,
-            "comment": None
+            "amount": -abs(amount), "playerId": player_id, "currencyCode": CURRENCY_CODE, "moneyStatus": MONEY_STATUS, "comment": None
         })
 
     async def get_balance(self, player_id):
-        return await self._run_in_browser("/Player/getPlayerBalanceById", {
-            "playerId": player_id
-        })
+        return await self._run_in_browser("/Player/getPlayerBalanceById", {"playerId": player_id})
 
     async def get_statistics(self, start=0, limit=10):
-        return await self._run_in_browser("/Statistics/getPlayersStatisticsPro", {
-            "start": start,
-            "limit": limit,
-            "filter": {}
-        })
+        return await self._run_in_browser("/Statistics/getPlayersStatisticsPro", {"start": start, "limit": limit, "filter": {}})
 
 api = IchancyAPI()
