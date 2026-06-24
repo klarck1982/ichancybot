@@ -2,7 +2,7 @@
 
 بوت تيليغرام لإدارة حسابات **Ichancy100** (تسجيل، إيداع، سحب، رصيد، سجل).
 
-> **تم التحديث (v4):** تم استبدال Playwright بـ `httpx` للاتصال المباشر بـ API (بدون Cloudflare).
+> **تم التحديث (v6):** استخدام `curl_cffi` لتجاوز Cloudflare (يقلّد بصفة TLS لمتصفح Chrome 124).
 
 ---
 
@@ -47,12 +47,12 @@ git push -u origin main
 ichancy_bot/
 ├── main.py              # نقطة البداية + لوحة المفاتيح
 ├── config.py            # الإعدادات (من Environment Variables)
-├── requirements.txt     # aiogram + httpx
+├── requirements.txt     # aiogram + curl-cffi
 ├── Dockerfile           # Python 3.11-slim
 ├── railway.toml         # إعدادات Railway
 ├── nixpacks.toml        # إعدادات Nixpacks
 ├── api/
-│   └── ichancy.py       # طلبات API مع httpx (بدون متصفح)
+│   └── ichancy.py       # طلبات API مع curl_cffi (يقلّد Chrome)
 ├── handlers/
 │   ├── register.py      # تسجيل لاعب جديد
 │   └── balance.py       # إيداع / سحب / رصيد / سجل
@@ -98,13 +98,16 @@ python main.py
 
 ---
 
-## 🆕 ما الجديد في v5؟
+## 🆕 ما الجديد في v6؟
 
 - ❌ **حذفنا Playwright** (كان بطيء جداً ويستهلك ذاكرة كبيرة)
-- ✅ **استبدلناه بـ httpx** (سريع جداً، خفيف، مناسب لـ Railway)
+- ❌ **تجاوزنا مشكلة Cloudflare 403**:
+  - `httpx` وحده لا يكفي — Cloudflare يفحص **بصمة TLS** (JA3/JA4) وليس فقط الـ headers
+  - ✅ استبدلناه بـ **`curl_cffi`** مع `impersonate="chrome124"` — يقلّد بصمة Chrome الحقيقية
+  - النتيجة: `Login → 200` بدلاً من `403 Forbidden` (تم اختباره فعلياً)
 - ✅ **إدارة جلسة كاملة** (Login → Cookies → Auto Re-login)
   - `login()` تلقائي عند أول طلب على `/User/signIn`
-  - الكوكيز تُحفظ تلقائياً في `httpx.AsyncClient`
+  - الكوكيز تُحفظ تلقائياً في `AsyncSession`
   - عند انتهاء الجلسة (401/403) → re-login تلقائي + retry
 - ✅ **دعم نمط استجابة Ichancy100**
   - الـ API يعيد HTTP 200 دائماً تقريباً حتى عند الفشل
@@ -114,19 +117,21 @@ python main.py
 - ✅ **إغلاق آمن** (`api.close()` يُستدعى عند إيقاف البوت)
 - ✅ **متغيرات جديدة** (`BASE_URL`, `HTTP_TIMEOUT`) لسهولة التبديل بين الداشبوردات
 
-## 🔄 كيف تعمل إدارة الجلسة؟
+## 🔄 كيف يعمل النظام؟
 
 ```
 ┌──────────────────────────────────────────────────────┐
 │  1️⃣  أول طلب (مثل /Player/getPlayerBalanceById)     │
 │      ↓                                               │
-│  2️⃣  _ensure_login() → login() → POST /User/signIn  │
+│  2️⃣  _ensure_login() → login() → GET / (warmup)      │
+│      ↓     curl_cffi يحاكي Chrome لتجاوز Cloudflare  │
+│  3️⃣  POST /User/signIn (login)                       │
 │      ↓                                               │
-│  3️⃣  السيرفر يعيد كوكيز (PHPSESSID, __cf_bm, ...)   │
+│  4️⃣  السيرفر يعيد كوكيز (PHPSESSID, __cf_bm, ...)   │
 │      ↓                                               │
-│  4️⃣  httpx يحفظ الكوكيز تلقائياً في الـ client       │
+│  5️⃣  AsyncSession يحفظ الكوكيز تلقائياً              │
 │      ↓                                               │
-│  5️⃣  الطلب الفعلي يُرسل مع الكوكيز تلقائياً         │
+│  6️⃣  الطلب الفعلي يُرسل مع الكوكيز تلقائياً         │
 └──────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────┐
