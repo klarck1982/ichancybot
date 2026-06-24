@@ -1,15 +1,18 @@
 import asyncio
 import logging
+
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
+
 from config import BOT_TOKEN
 from database.db import init_db
 from handlers import register, balance
+from api.ichancy import api
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
 
@@ -19,6 +22,7 @@ dp = Dispatcher(storage=MemoryStorage())
 dp.include_router(register.router)
 dp.include_router(balance.router)
 
+
 def main_keyboard():
     return types.ReplyKeyboardMarkup(
         keyboard=[
@@ -26,8 +30,9 @@ def main_keyboard():
             [types.KeyboardButton(text="💰 إيداع"), types.KeyboardButton(text="💸 سحب")],
             [types.KeyboardButton(text="💳 عرض الرصيد"), types.KeyboardButton(text="📊 سجل العمليات")],
         ],
-        resize_keyboard=True
+        resize_keyboard=True,
     )
+
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -35,8 +40,9 @@ async def cmd_start(message: types.Message):
         f"👋 أهلاً {message.from_user.first_name}!\n\n"
         "🎰 مرحباً بك في بوت إدارة حسابات Ichancy\n\n"
         "اختر العملية من القائمة أدناه:",
-        reply_markup=main_keyboard()
+        reply_markup=main_keyboard(),
     )
+
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
@@ -47,13 +53,29 @@ async def cmd_help(message: types.Message):
         "💸 سحب — سحب رصيد\n"
         "💳 عرض الرصيد — الرصيد الحالي\n"
         "📊 سجل العمليات — آخر العمليات\n",
-        reply_markup=main_keyboard()
+        reply_markup=main_keyboard(),
     )
+
+
+async def on_shutdown():
+    """تنظيف عند إيقاف البوت."""
+    logger.info("🛑 إيقاف البوت...")
+    await api.close()
+    logger.info("✅ تم إغلاق API client بنجاح")
+
 
 async def main():
     init_db()
-    logger.info("البوت يعمل...")
-    await dp.start_polling(bot)
+    logger.info("🚀 البوت يعمل...")
+
+    # تسجيل handler الإيقاف
+    dp.shutdown.register(on_shutdown)
+
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await on_shutdown()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

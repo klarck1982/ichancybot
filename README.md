@@ -1,6 +1,10 @@
 # 🎰 Ichancy Telegram Bot
 
-بوت تيليغرام لإدارة حسابات Ichancy (تسجيل، إيداع، سحب، رصيد).
+بوت تيليغرام لإدارة حسابات **Ichancy100** (تسجيل، إيداع، سحب، رصيد، سجل).
+
+> **تم التحديث (v4):** تم استبدال Playwright بـ `httpx` للاتصال المباشر بـ API (بدون Cloudflare).
+
+---
 
 ## ⚙️ الإعداد على Railway
 
@@ -14,44 +18,120 @@ git push -u origin main
 ```
 
 ### 2. أنشئ مشروعاً على Railway
-- اذهب إلى https://railway.app
+- اذهب إلى [https://railway.app](https://railway.app/)
 - اضغط **New Project → Deploy from GitHub**
 - اختر الريبو
 
 ### 3. أضف المتغيرات في Railway
+
 اذهب إلى **Variables** وأضف:
-```
-BOT_TOKEN=your_telegram_bot_token
-AGENT_USERNAME=your_email@gmail.com
-AGENT_PASSWORD=your_password
-PARENT_ID=2751155
-```
+
+| المتغير | الوصف | القيمة الافتراضية |
+|---|---|---|
+| `BOT_TOKEN` | توكن بوت تيليغرام | - |
+| `AGENT_USERNAME` | إيميل حساب الـ agent على ichancy100 | - |
+| `AGENT_PASSWORD` | كلمة سر الـ agent | - |
+| `PARENT_ID` | رقم الـ parent | `2751155` |
+| `BASE_URL` | رابط الـ API | `https://agents.ichancy100.com/global/api` |
+| `CURRENCY_CODE` | كود العملة | `NSP` |
+| `MONEY_STATUS` | حالة المبلغ | `5` |
+| `HTTP_TIMEOUT` | مهلة الاتصال (ثانية) | `30` |
 
 ### 4. Railway سيبني ويشغل تلقائياً ✅
 
 ---
 
 ## 📁 هيكلة المشروع
+
 ```
 ichancy_bot/
-├── main.py              # نقطة البداية
-├── config.py            # الإعدادات
-├── requirements.txt     # المكتبات
+├── main.py              # نقطة البداية + لوحة المفاتيح
+├── config.py            # الإعدادات (من Environment Variables)
+├── requirements.txt     # aiogram + httpx
+├── Dockerfile           # Python 3.11-slim
 ├── railway.toml         # إعدادات Railway
+├── nixpacks.toml        # إعدادات Nixpacks
 ├── api/
-│   └── ichancy.py       # طلبات API مع Playwright
+│   └── ichancy.py       # طلبات API مع httpx (بدون متصفح)
 ├── handlers/
 │   ├── register.py      # تسجيل لاعب جديد
-│   └── balance.py       # إيداع / سحب / رصيد
+│   └── balance.py       # إيداع / سحب / رصيد / سجل
 └── database/
     └── db.py            # SQLite
 ```
 
+---
+
+## 🔌 الـ API Endpoints المستخدمة
+
+| العملية | Endpoint |
+|---|---|
+| تسجيل لاعب | `POST /Player/registerPlayer` |
+| إيداع | `POST /Player/depositToPlayer` |
+| سحب | `POST /Player/withdrawFromPlayer` |
+| عرض الرصيد | `POST /Player/getPlayerBalanceById` |
+| إحصائيات | `POST /Statistics/getPlayersStatisticsPro` |
+
+كل الطلبات تستخدم **HTTP Basic Auth** (`username:password`).
+
+---
+
 ## 🤖 أوامر البوت
+
 | الزر | الوظيفة |
-|------|---------|
-| 📝 تسجيل لاعب جديد | إنشاء حساب على ichancy |
+|---|---|
+| 📝 تسجيل لاعب جديد | إنشاء حساب على ichancy100 |
 | 💰 إيداع | إضافة رصيد |
 | 💸 سحب | سحب رصيد |
 | 💳 عرض الرصيد | الرصيد الحالي |
 | 📊 سجل العمليات | آخر 5 عمليات |
+
+---
+
+## 🛠️ التشغيل المحلي
+
+```bash
+pip install -r requirements.txt
+export BOT_TOKEN=xxx AGENT_USERNAME=xxx AGENT_PASSWORD=xxx
+python main.py
+```
+
+---
+
+## 🆕 ما الجديد في v5؟
+
+- ❌ **حذفنا Playwright** (كان بطيء جداً ويستهلك ذاكرة كبيرة)
+- ✅ **استبدلناه بـ httpx** (سريع جداً، خفيف، مناسب لـ Railway)
+- ✅ **إدارة جلسة كاملة** (Login → Cookies → Auto Re-login)
+  - `login()` تلقائي عند أول طلب على `/User/signIn`
+  - الكوكيز تُحفظ تلقائياً في `httpx.AsyncClient`
+  - عند انتهاء الجلسة (401/403) → re-login تلقائي + retry
+- ✅ **دعم نمط استجابة Ichancy100**
+  - الـ API يعيد HTTP 200 دائماً تقريباً حتى عند الفشل
+  - الكود يفحص حقل `result` ويُحوّل `result:false` إلى `{"error":...}`
+  - يستخرج رسائل الخطأ من `notification[]`
+- ✅ **معالجة أخطاء محسّنة** (timeout, network errors, invalid JSON)
+- ✅ **إغلاق آمن** (`api.close()` يُستدعى عند إيقاف البوت)
+- ✅ **متغيرات جديدة** (`BASE_URL`, `HTTP_TIMEOUT`) لسهولة التبديل بين الداشبوردات
+
+## 🔄 كيف تعمل إدارة الجلسة؟
+
+```
+┌──────────────────────────────────────────────────────┐
+│  1️⃣  أول طلب (مثل /Player/getPlayerBalanceById)     │
+│      ↓                                               │
+│  2️⃣  _ensure_login() → login() → POST /User/signIn  │
+│      ↓                                               │
+│  3️⃣  السيرفر يعيد كوكيز (PHPSESSID, __cf_bm, ...)   │
+│      ↓                                               │
+│  4️⃣  httpx يحفظ الكوكيز تلقائياً في الـ client       │
+│      ↓                                               │
+│  5️⃣  الطلب الفعلي يُرسل مع الكوكيز تلقائياً         │
+└──────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────┐
+│  ⚠️  إذا انتهت الجلسة (HTTP 401/403):               │
+│      ↓                                               │
+│  ✅  re-login تلقائي + retry مرة واحدة               │
+└──────────────────────────────────────────────────────┘
+```
