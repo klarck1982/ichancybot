@@ -8,8 +8,7 @@ from config import BASE_URL, AGENT_USERNAME, AGENT_PASSWORD, CURRENCY_CODE, MONE
 
 logger = logging.getLogger(__name__)
 
-# بيانات البروكسي من المتغيرات
-PROXY_SERVER = os.getenv("PROXY_SERVER", "")  # مثال: http://1.2.3.4:8080
+PROXY_SERVER = os.getenv("PROXY_SERVER", "")
 PROXY_USER = os.getenv("PROXY_USER", "")
 PROXY_PASS = os.getenv("PROXY_PASS", "")
 
@@ -50,13 +49,27 @@ class IchancyAPI:
             context = await browser.new_context(**context_args)
             page = await context.new_page()
             try:
-                await page.goto("https://agents.ichancy.com", wait_until="domcontentloaded", timeout=40000)
-                await page.wait_for_timeout(5000)
+                # افتح الموقع وانتظر حل Cloudflare JS Challenge (5-8 ثواني)
+                await page.goto("https://agents.ichancy.com", wait_until="domcontentloaded", timeout=60000)
+                
+                # انتظر حتى تختفي صفحة Cloudflare
+                try:
+                    await page.wait_for_function(
+                        "() => !document.title.includes('Just a moment')",
+                        timeout=15000
+                    )
+                    logger.info("تم تجاوز Cloudflare بنجاح")
+                except:
+                    logger.warning("انتهى timeout Cloudflare، نكمل...")
+                
+                await page.wait_for_timeout(2000)
 
+                # تسجيل الدخول
                 login_script = f"(async()=>{{await fetch('/global/api/User/signIn',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{username:{json.dumps(self.username)},password:{json.dumps(self.password)}}})}})}})()"
                 await page.evaluate(login_script, None)
                 await page.wait_for_timeout(2000)
 
+                # الطلب الفعلي
                 b64 = base64.b64encode(f"{self.username}:{self.password}".encode()).decode()
                 url = self.base_url + endpoint
                 req_script = f"(async()=>{{const r=await fetch({json.dumps(url)},{{method:'POST',headers:{{'Content-Type':'application/json','Authorization':'Basic {b64}'}},body:JSON.stringify({json.dumps(body)})}});return{{status:r.status,body:await r.text()}}}})() "
