@@ -1,139 +1,262 @@
-#v3
-import asyncio
+# v5.1 — httpx + إدارة جلسة + دعم result:false
 import logging
-import json
-import base64
-import os
-from playwright.async_api import async_playwright
-from config import BASE_URL, AGENT_USERNAME, AGENT_PASSWORD, CURRENCY_CODE, MONEY_STATUS, PARENT_ID
+from typing import Optional
+
+import httpx
+
+from config import (
+    BASE_URL,
+    AGENT_USERNAME,
+    AGENT_PASSWORD,
+    CURRENCY_CODE,
+    MONEY_STATUS,
+    PARENT_ID,
+    HTTP_TIMEOUT,
+)
 
 logger = logging.getLogger(__name__)
 
-PROXY_SERVER = os.getenv("PROXY_SERVER", "")
-PROXY_USER = os.getenv("PROXY_USER", "")
-PROXY_PASS = os.getenv("PROXY_PASS", "")
 
 class IchancyAPI:
+    """
+    عميل API لـ ichancy100.com مع إدارة جلسة كاملة:
+      1. login() على /User/signIn للحصول على الكوكيز
+      2. كل الطلبات التالية تستخدم نفس الـ client (يحمل الكوكيز تلقائياً)
+      3. إذا انتهت الجلسة (401/403 أو result=false بسبب auth) → re-login + retry
+
+    ملاحظة مهمة:
+      الـ API يعيد HTTP 200 حتى عند فشل العملية، مع body مثل:
+        {"status":true, "result":false, "notification":[{"code":1,"content":"..."}]}
+      لذلك نتحقق من حقل "result" أيضاً.
+    """
+
+    LOGIN_ENDPOINT = "/User/signIn"
+
     def __init__(self):
+        self.base_url = BASE_URL.rstrip("/")
         self.username = AGENT_USERNAME
         self.password = AGENT_PASSWORD
-        self.base_url = BASE_URL
+        self._client: Optional[httpx.AsyncClient] = None
+        self._logged_in: bool = False
 
-    def _get_proxy(self):
-        if not PROXY_SERVER:
-            return None
-        proxy = {"server": PROXY_SERVER}
-        if PROXY_USER:
-            proxy["username"] = PROXY_USER
-        if PROXY_PASS:
-            proxy["password"] = PROXY_PASS
-        return proxy
+    # ---------- إدارة الـ client ----------
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                timeout=HTTP_TIMEOUT,
+                follow_redirects=True,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+            )
+        return self._client
 
-    async def _wait_for_cloudflare(self, page):
-        """انتظر حتى تختفي صفحة Cloudflare تماماً"""
-        for i in range(20):  # انتظر حتى 20 ثانية
-            title = await page.title()
-            logger.info(f"عنوان الصفحة ({i+1}): {title}")
-            if "Just a moment" not in title and "Cloudflare" not in title:
-                logger.info("✅ تم تجاوز Cloudflare")
-                return True
-            await page.wait_for_timeout(1000)
-        logger.warning("⚠️ انتهى وقت انتظار Cloudflare")
-        return False
-
-    async def _run_in_browser(self, endpoint, body):
-        proxy = self._get_proxy()
-        async with async_playwright() as p:
-            launch_args = {
-                "headless": True,
-                "args": [
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-blink-features=AutomationControlled"
-                ]
-            }
-            if proxy:
-                launch_args["proxy"] = proxy
-                logger.info(f"استخدام البروكسي: {PROXY_SERVER}")
-
-            browser = await p.chromium.launch(**launch_args)
-            context_args = {
-                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                "viewport": {"width": 1280, "height": 720},
-                "java_script_enabled": True,
-            }
-            if proxy:
-                context_args["proxy"] = proxy
-
-            context = await browser.new_context(**context_args)
-
-            # إخفاء علامات Playwright
-            await context.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3]});
-                Object.defineProperty(navigator, 'languages', {get: () => ['ar', 'en-US']});
-            """)
-
-            page = await context.new_page()
+    async def _reset_client(self) -> None:
+        if self._client is not None:
             try:
-                await page.goto("https://agents.ichancy.com", wait_until="domcontentloaded", timeout=60000)
+                await self._client.aclose()
+            except Exception:
+                pass
+        self._client = None
+        self._logged_in = False
 
-                # انتظر حتى تختفي صفحة Cloudflare
-                passed = await self._wait_for_cloudflare(page)
-                if not passed:
-                    return {"error": "Cloudflare blocking - proxy not working"}
+    async def close(self) -> None:
+        await self._reset_client()
+        logger.info("🔌 API client closed")
 
-                await page.wait_for_timeout(1000)
+    # ---------- تسجيل الدخول ----------
+    async def login(self) -> dict:
+        client = await self._get_client()
+        url = f"{self.base_url}{self.LOGIN_ENDPOINT}"
+        try:
+            r = await client.post(
+                url,
+                json={
+                    "username": self.username,
+                    "password": self.password,
+                },
+            )
+            logger.info(f"🔐 Login → {r.status_code} | {r.text[:200]}")
 
-                # تسجيل الدخول
-                login_script = f"(async()=>{{await fetch('/global/api/User/signIn',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{username:{json.dumps(self.username)},password:{json.dumps(self.password)}}})}})}})()"
-                await page.evaluate(login_script, None)
-                await page.wait_for_timeout(1500)
+            if r.status_code not in (200, 201):
+                return {
+                    "error": f"Login HTTP failed: {r.status_code}: {r.text[:300]}"
+                }
 
-                # الطلب الفعلي
-                b64 = base64.b64encode(f"{self.username}:{self.password}".encode()).decode()
-                url = self.base_url + endpoint
-                req_script = f"(async()=>{{const r=await fetch({json.dumps(url)},{{method:'POST',headers:{{'Content-Type':'application/json','Authorization':'Basic {b64}'}},body:JSON.stringify({json.dumps(body)})}});return{{status:r.status,body:await r.text()}}}})() "
-                result = await page.evaluate(req_script, None)
+            # تحليل الاستجابة
+            try:
+                data = r.json()
+            except ValueError:
+                return {"error": f"Invalid login JSON: {r.text[:200]}"}
 
-                logger.info(f"رد {endpoint} ({result['status']}): {result['body'][:300]}")
+            # الـ API قد يعيد HTTP 200 مع result:false
+            if isinstance(data, dict) and data.get("result") is False:
+                self._logged_in = False
+                msg = self._extract_notifications(data)
+                return {"error": f"Login failed: {msg or 'invalid credentials'}"}
 
-                if result['status'] == 200:
-                    try:
-                        return json.loads(result['body'])
-                    except:
-                        return {"error": result['body']}
-                else:
-                    return {"error": f"HTTP {result['status']}: {result['body'][:300]}"}
+            self._logged_in = True
+            cookies = {c.name: c.value for c in client.cookies.jar}
+            logger.info(
+                f"🍪 Cookies received: {list(cookies.keys()) or '(none)'}"
+            )
+            return {"ok": True, "cookies": cookies}
 
-            except Exception as e:
-                logger.error(f"خطأ {endpoint}: {e}")
-                return {"error": str(e)}
-            finally:
-                await browser.close()
+        except httpx.TimeoutException:
+            logger.error("⏱️ Login timed out")
+            return {"error": "Login timed out"}
+        except httpx.RequestError as e:
+            logger.error(f"❌ Login network error: {e}")
+            return {"error": f"Login network error: {e}"}
+        except Exception as e:
+            logger.error(f"❌ Unexpected login error: {e}")
+            return {"error": str(e)}
 
-    async def login(self): pass
+    async def _ensure_login(self) -> dict:
+        if self._logged_in:
+            return {"ok": True}
+        return await self.login()
 
-    async def register_player(self, email, password, login, country="SY"):
-        return await self._run_in_browser("/Player/registerPlayer", {
-            "player": {"email": email, "password": password, "parentId": PARENT_ID, "login": login, "countryCode": country}
-        })
+    # ---------- تنفيذ الطلب ----------
+    async def _request(self, endpoint: str, body: dict) -> dict:
+        lr = await self._ensure_login()
+        if "error" in lr:
+            return lr
 
-    async def deposit(self, player_id, amount):
-        return await self._run_in_browser("/Player/depositToPlayer", {
-            "amount": amount, "playerId": player_id, "currencyCode": CURRENCY_CODE, "moneyStatus": MONEY_STATUS, "comment": None
-        })
+        return await self._do_post(endpoint, body)
 
-    async def withdraw(self, player_id, amount):
-        return await self._run_in_browser("/Player/withdrawFromPlayer", {
-            "amount": -abs(amount), "playerId": player_id, "currencyCode": CURRENCY_CODE, "moneyStatus": MONEY_STATUS, "comment": None
-        })
+    async def _do_post(self, endpoint: str, body: dict) -> dict:
+        client = await self._get_client()
+        url = f"{self.base_url}{endpoint}"
+        try:
+            r = await client.post(url, json=body)
+            logger.info(
+                f"📤 POST {endpoint} → {r.status_code} | {r.text[:200]}"
+            )
 
-    async def get_balance(self, player_id):
-        return await self._run_in_browser("/Player/getPlayerBalanceById", {"playerId": player_id})
+            if r.status_code in (200, 201):
+                return self._parse_response(endpoint, r)
 
-    async def get_statistics(self, start=0, limit=10):
-        return await self._run_in_browser("/Statistics/getPlayersStatisticsPro", {"start": start, "limit": limit, "filter": {}})
+            # انتهاء الجلسة عبر HTTP
+            if r.status_code in (401, 403):
+                logger.warning(
+                    f"⚠️ Session expired on {endpoint} (HTTP {r.status_code}), re-logging in..."
+                )
+                return await self._retry_with_relogin(endpoint, body)
 
+            return {"error": f"HTTP {r.status_code}: {r.text[:300]}"}
+
+        except httpx.TimeoutException:
+            logger.error(f"⏱️ Timeout {endpoint}")
+            return {"error": "Request timed out"}
+        except httpx.RequestError as e:
+            logger.error(f"❌ Network error {endpoint}: {e}")
+            return {"error": f"Network error: {e}"}
+        except Exception as e:
+            logger.error(f"❌ Unexpected error {endpoint}: {e}")
+            return {"error": str(e)}
+
+    async def _retry_with_relogin(self, endpoint: str, body: dict) -> dict:
+        """إعادة المحاولة بعد تسجيل دخول جديد (مرة واحدة فقط)."""
+        await self._reset_client()
+        lr = await self.login()
+        if "error" in lr:
+            return lr
+        return await self._do_post(endpoint, body)
+
+    # ---------- تحليل الاستجابة ----------
+    def _parse_response(self, endpoint: str, response: httpx.Response) -> dict:
+        """
+        تحليل استجابة الـ API. الـ API يعيد HTTP 200 دائماً تقريباً، حتى عند
+        فشل العملية، مع body مثل:
+          {"status":true, "result":false, "notification":[{"content":"..."}]}
+        نُحوّل result:false إلى {"error":...} ليتوافق مع توقعات الـ handlers.
+        """
+        try:
+            data = response.json()
+        except ValueError:
+            return {"error": f"Invalid JSON from {endpoint}: {response.text[:200]}"}
+
+        if not isinstance(data, dict):
+            return data
+
+        # فشل العملية → أعد {"error":..., "_raw":...}
+        if data.get("result") is False:
+            msg = self._extract_notifications(data)
+            logger.warning(f"⚠️ {endpoint} failed: {msg or 'result=false'}")
+            return {
+                "error": msg or f"{endpoint} failed",
+                "_raw": data,
+            }
+
+        return data
+
+    @staticmethod
+    def _extract_notifications(data: dict) -> str:
+        """استخراج رسائل الخطأ من notification array."""
+        notifications = data.get("notification") or []
+        if isinstance(notifications, list) and notifications:
+            return "; ".join(
+                str(n.get("content", ""))
+                for n in notifications
+                if isinstance(n, dict)
+            )
+        return ""
+
+    # ---------- العمليات ----------
+    async def register_player(
+        self, email: str, password: str, login: str, country: str = "SY"
+    ) -> dict:
+        return await self._request(
+            "/Player/registerPlayer",
+            {
+                "player": {
+                    "email": email,
+                    "password": password,
+                    "parentId": PARENT_ID,
+                    "login": login,
+                    "countryCode": country,
+                }
+            },
+        )
+
+    async def deposit(self, player_id, amount) -> dict:
+        return await self._request(
+            "/Player/depositToPlayer",
+            {
+                "amount": amount,
+                "playerId": player_id,
+                "currencyCode": CURRENCY_CODE,
+                "moneyStatus": MONEY_STATUS,
+                "comment": None,
+            },
+        )
+
+    async def withdraw(self, player_id, amount) -> dict:
+        return await self._request(
+            "/Player/withdrawFromPlayer",
+            {
+                "amount": -abs(amount),
+                "playerId": player_id,
+                "currencyCode": CURRENCY_CODE,
+                "moneyStatus": MONEY_STATUS,
+                "comment": None,
+            },
+        )
+
+    async def get_balance(self, player_id) -> dict:
+        return await self._request(
+            "/Player/getPlayerBalanceById",
+            {"playerId": player_id},
+        )
+
+    async def get_statistics(self, start: int = 0, limit: int = 10) -> dict:
+        return await self._request(
+            "/Statistics/getPlayersStatisticsPro",
+            {"start": start, "limit": limit, "filter": {}},
+        )
+
+
+# Singleton
 api = IchancyAPI()
