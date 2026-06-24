@@ -28,12 +28,29 @@ class IchancyAPI:
             proxy["password"] = PROXY_PASS
         return proxy
 
+    async def _wait_for_cloudflare(self, page):
+        """انتظر حتى تختفي صفحة Cloudflare تماماً"""
+        for i in range(20):  # انتظر حتى 20 ثانية
+            title = await page.title()
+            logger.info(f"عنوان الصفحة ({i+1}): {title}")
+            if "Just a moment" not in title and "Cloudflare" not in title:
+                logger.info("✅ تم تجاوز Cloudflare")
+                return True
+            await page.wait_for_timeout(1000)
+        logger.warning("⚠️ انتهى وقت انتظار Cloudflare")
+        return False
+
     async def _run_in_browser(self, endpoint, body):
         proxy = self._get_proxy()
         async with async_playwright() as p:
             launch_args = {
                 "headless": True,
-                "args": ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+                "args": [
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled"
+                ]
             }
             if proxy:
                 launch_args["proxy"] = proxy
@@ -41,33 +58,37 @@ class IchancyAPI:
 
             browser = await p.chromium.launch(**launch_args)
             context_args = {
-                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "viewport": {"width": 1280, "height": 720},
+                "java_script_enabled": True,
             }
             if proxy:
                 context_args["proxy"] = proxy
 
             context = await browser.new_context(**context_args)
+
+            # إخفاء علامات Playwright
+            await context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3]});
+                Object.defineProperty(navigator, 'languages', {get: () => ['ar', 'en-US']});
+            """)
+
             page = await context.new_page()
             try:
-                # افتح الموقع وانتظر حل Cloudflare JS Challenge (5-8 ثواني)
                 await page.goto("https://agents.ichancy.com", wait_until="domcontentloaded", timeout=60000)
-                
+
                 # انتظر حتى تختفي صفحة Cloudflare
-                try:
-                    await page.wait_for_function(
-                        "() => !document.title.includes('Just a moment')",
-                        timeout=15000
-                    )
-                    logger.info("تم تجاوز Cloudflare بنجاح")
-                except:
-                    logger.warning("انتهى timeout Cloudflare، نكمل...")
-                
-                await page.wait_for_timeout(2000)
+                passed = await self._wait_for_cloudflare(page)
+                if not passed:
+                    return {"error": "Cloudflare blocking - proxy not working"}
+
+                await page.wait_for_timeout(1000)
 
                 # تسجيل الدخول
                 login_script = f"(async()=>{{await fetch('/global/api/User/signIn',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{username:{json.dumps(self.username)},password:{json.dumps(self.password)}}})}})}})()"
                 await page.evaluate(login_script, None)
-                await page.wait_for_timeout(2000)
+                await page.wait_for_timeout(1500)
 
                 # الطلب الفعلي
                 b64 = base64.b64encode(f"{self.username}:{self.password}".encode()).decode()
